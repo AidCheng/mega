@@ -9,6 +9,7 @@ use oauth2::{
 };
 use std::path::Path;
 
+use crate::api::oauth::campsite_store::CampsiteApiStore;
 use ceres::{
     api_service::{
         import_api_service::ImportApiService, mono_api_service::MonoApiService, ApiHandler,
@@ -16,12 +17,11 @@ use ceres::{
     protocol::repo::Repo,
 };
 use common::errors::ProtocolError;
+use jupiter::storage::note_storage::NoteStorage;
 use jupiter::storage::{
     conversation_storage::ConversationStorage, issue_storage::IssueStorage, mr_storage::MrStorage,
     user_storage::UserStorage, Storage,
 };
-
-use crate::api::oauth::campsite_store::CampsiteApiStore;
 
 pub mod api_common;
 pub mod api_router;
@@ -31,6 +31,7 @@ pub mod issue;
 pub mod label;
 pub mod lfs;
 pub mod mr;
+pub mod notes;
 pub mod oauth;
 pub mod user;
 
@@ -106,6 +107,10 @@ impl MonoApiServiceState {
 
     fn conv_stg(&self) -> ConversationStorage {
         self.storage.conversation_storage()
+    }
+
+    fn note_stg(&self) -> NoteStorage {
+        self.storage.note_storage()
     }
 
     async fn api_handler(&self, path: &Path) -> Result<Box<dyn ApiHandler>, ProtocolError> {
