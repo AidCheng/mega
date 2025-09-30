@@ -41,13 +41,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::api_service::ApiHandler;
-use crate::model::git::CreateFileInfo;
+use crate::model::git::{CreateFileInfo};
 use crate::model::mr::MrDiffFile;
+use crate::model::third_party::ThirdPartyTree;
+use crate::pack::import_repo::ImportRepo;
+use crate::protocol::import_refs::RefCommand;
 use async_trait::async_trait;
 use callisto::sea_orm_active_enums::ConvTypeEnum;
 use callisto::{mega_mr, mega_tree};
 use common::errors::MegaError;
 use common::model::Pagination;
+use http::header::{ACCEPT, AUTHORIZATION};
+use http::{HeaderMap, HeaderValue};
 use jupiter::storage::base_storage::StorageConnector;
 use jupiter::storage::Storage;
 use jupiter::utils::converter::generate_git_keep_with_timestamp;
@@ -58,6 +63,11 @@ use mercury::internal::object::commit::Commit;
 use mercury::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 use neptune::model::diff_model::DiffItem;
 use neptune::neptune_engine::Diff;
+
+use reqwest::Client;
+use serde::Deserialize;
+use serde_json::Value;
+use utoipa::openapi::Header;
 
 #[derive(Clone)]
 pub struct MonoApiService {
@@ -687,6 +697,139 @@ impl MonoApiService {
         }
         Ok(result)
     }
+
+    pub async fn import_third_party_repo(
+        &self,
+        third_party_link: &str,
+    ) -> Result<(), MegaError> {
+        let (owner, repo) = self.parse_third_party_link(third_party_link).await?;
+
+
+        Ok(())
+    }
+
+    async fn parse_third_party_link(
+        &self,
+        third_party_link: &str,
+    ) -> Result<(String, String), MegaError> {
+        let url = third_party_link
+            .trim_end_matches(".git")
+            .trim_end_matches("/");
+        let url = url
+            .strip_prefix("https://github.com/")
+            .ok_or_else(|| MegaError::with_message("Invalid third party link"))?;
+
+        let (owner, repo) = url
+            .rsplit_once('/')
+            .ok_or_else(|| MegaError::with_message("Invalid third party link"))?;
+
+        Ok((owner.to_string(), repo.to_string()))
+    }
+
+    async fn fetch_third_party_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<ThirdPartyTree,MegaError> {
+        let commits = self.fetch_commit_list(owner, repo, token).await?;
+
+        Ok(ThirdPartyTree{
+            sha: String::new(),
+            url: String::new(),
+            tree: vec![],
+            truncated: false,
+        })
+    }
+
+    async fn construct_import_repo(
+        &self,
+    ) -> Result<(), MegaError> {
+        
+        Ok()
+    }
+
+
+    async fn fetch_commit_list(
+        &self,
+        owner: &str,
+        repo: &str,
+        token: &str,
+    ) -> Result<(), MegaError> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/commits");
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+        headers.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+        headers.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+
+        let client = Client::new();
+        let resp = client.get(&url).headers(headers).send().await.expect("Failed to send request");
+        if !resp.status().is_success() {
+            return Err(MegaError::with_message(format!("Failed to fetch commit list: HTTP {}", resp.status())));
+        }
+
+        let commits:Vec<Value> = resp.json().await.expect("Failed to parse JSON");
+
+        Ok(())
+    }
+
+    // async fn build_command_list_from_tree(
+    //     &self,
+    //     tree: &ThirdPartyTree,
+    // ) -> Vec<RefCommand> {
+
+    //     let mut commands = Vec::new();
+    // }
+
+    async fn fetch_repo_entry(
+        &self,
+        owner: &str,
+        repo: &str,
+        token: &str,
+    ) -> Result<String, MegaError> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/branches");
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+        headers.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+        headers.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+
+        let client = Client::new();
+        let resp = client.get(&url).headers(headers).send().await.expect("Failed to send request");
+        if !resp.status().is_success() {
+            return Err(MegaError::with_message(format!("Failed to fetch repo entry: HTTP {}", resp.status())));
+        }
+
+        let repo_info:Value = resp.json().await.expect("Failed to parse JSON");
+        let sha = repo_info["commit"]["sha"].as_str().unwrap_or("").to_string();
+
+        Ok(sha)
+    }
+
+    async fn get_tree_from_entry(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        token: &str,
+    ) -> Result<ThirdPartyTree, MegaError> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"); 
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+        headers.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+        headers.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+
+        let client = Client::new();
+        let resp = client.get(url).headers(headers).send().await.expect("Failed to send request");
+        if !resp.status().is_success() {
+            return Err(MegaError::with_message(format!("Failed to fetch tree from entry: HTTP {}", resp.status())));
+        }
+
+        let file_tree: ThirdPartyTree = resp.json().await.map_err(|e| MegaError::with_message(format!("Failed to parse JSON: {}", e)))?;
+        Ok(file_tree)
+    }
+
 }
 
 #[cfg(test)]
@@ -1173,5 +1316,86 @@ mod test {
             diff_output[0].data.contains("diff --git"),
             "Should contain git diff header"
         );
+    }
+}
+
+#[tokio::test]
+async fn test_github_api(){
+    use reqwest::Client;
+
+    let owner = "web3infra-foundation";
+    let link = "mega";
+    let url = format!("https://api.github.com/repos/{}/{}/branches",owner, link);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+    headers.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+    headers.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+    let client = Client::new();
+    let resp = client.get(&url).headers(headers).send().await.expect("Failed to send request");
+
+    let mut repo_info = Value::Null;
+    if resp.status().is_success() {
+        repo_info = resp.json().await.expect("Failed to parse JSON");
+        println!("Repo info: {:#?}", repo_info);
+    } else {
+        assert!(false, "Request failed with status: {}", resp.status());
+    }
+
+    let sha = repo_info[0]["commit"]["sha"].as_str().unwrap();
+    println!("Latest commit SHA: {}", sha);
+
+    let mut tree_header = HeaderMap::new();
+    tree_header.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+    tree_header.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+    tree_header.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+    tree_header.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+    let tree_url = format!("https://api.github.com/repos/{}/{}/git/trees/{}?",owner, link, sha);
+    let client = Client::new();
+
+    let resp = client.get(&tree_url).headers(tree_header).send().await.expect("Failed to send request");
+    if resp.status().is_success() {
+        let tree_info: ThirdPartyTree = resp.json().await.expect("Failed to parse JSON");
+        println!("Tree info: {:#?}", tree_info);
+    } else {
+        assert!(false, "Request failed with status: {}", resp.status());
+    }
+}
+
+#[test]
+fn test_parse_github_link() {
+    let url = "https://github.com/web3infra-foundation/libra/";
+    let url = url
+        .trim_end_matches(".git")
+        .trim_end_matches("/")
+        .strip_prefix("https://github.com/")
+        .expect("Invalid GitHub URL");
+    let (owner, repo) = url.rsplit_once('/').unwrap();
+    assert_eq!(owner, "web3infra-foundation");
+    assert_eq!(repo, "libra");
+}
+
+#[tokio::test]
+async fn test_list_commits() {
+    use reqwest::Client;
+
+    let owner = "aidcheng";
+    let link = "aidcheng.github.io";
+    let url = format!("https://api.github.com/repos/{}/{}/commits",owner, link);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+    headers.insert("X-Github-Api-Version", HeaderValue::from_static("2022-11-28"));
+    headers.insert("User-Agent", HeaderValue::from_static("my-rust-client"));
+    let client = Client::new();
+    let resp = client.get(&url).headers(headers).send().await.expect("Failed to send request");
+
+    if resp.status().is_success() {
+        let repo_info: Value = resp.json().await.expect("Failed to parse JSON");
+        println!("Repo info: {:#?}", repo_info);
+    } else {
+        assert!(false, "Request failed with status: {}", resp.status());
     }
 }
